@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: linkplease
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    ports:
+      - "10000:10000"
+    environment:
+      # asyncpg needs this exact format (postgresql+asyncpg://).
+      # 'db' is the Docker Compose service name — resolves to the db container.
+      DATABASE_URL: postgresql+asyncpg://postgres:password@db:5432/linkplease
+      # PSEUDOGRAM_API_KEY is read from the host's environment (set in your shell
+      # or a .env file that docker-compose loads automatically).
+      PSEUDOGRAM_API_KEY: ${PSEUDOGRAM_API_KEY}
+      PSEUDOGRAM_BASE_URL: ${PSEUDOGRAM_BASE_URL:-https://pseudogram-api.onrender.com}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  postgres_data:

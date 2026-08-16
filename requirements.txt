@@ -1,0 +1,25 @@
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Database (async)
+sqlalchemy[asyncio]==2.0.35
+asyncpg==0.29.0            # async PostgreSQL driver used by SQLAlchemy
+alembic==1.13.3            # database migrations (optional but useful)
+
+# Config / validation
+pydantic==2.9.2
+pydantic-settings==2.5.2   # BaseSettings for reading env vars
+
+# HTTP client (async)
+httpx==0.27.2
+
+# Testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
+pytest-mock==3.14.0
+aiosqlite==0.20.0          # async SQLite driver used by tests (in-memory DB)
+httpx                      # already listed above; used by FastAPI TestClient too
+
+# Standard library modules used (no install needed):
+#   asyncio, hmac, hashlib, os, datetime, uuid, logging
