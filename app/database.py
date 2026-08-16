@@ -26,6 +26,10 @@ from app.config import settings
 # echo=False in production so SQL statements aren't printed to stdout.
 # pool_pre_ping=True makes SQLAlchemy test each connection before using it,
 # which prevents "connection closed" errors after the DB restarts.
+# Safe diagnostic: verify the scheme of the DATABASE_URL before engine creation.
+_scheme = settings.DATABASE_URL.split("://")[0] if "://" in settings.DATABASE_URL else "unknown"
+print(f"DATABASE_SCHEME={_scheme}")
+
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,

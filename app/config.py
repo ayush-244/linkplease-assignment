@@ -6,6 +6,7 @@ All settings are validated at startup, so missing required vars raise a
 clear error before the app accepts any traffic.
 """
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,6 +17,21 @@ class Settings(BaseSettings):
     # Full async connection string for SQLAlchemy + asyncpg.
     # Example: postgresql+asyncpg://postgres:password@localhost:5432/linkplease
     DATABASE_URL: str
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def fix_database_url_scheme(cls, v: str) -> str:
+        if not v:
+            return v
+        
+        # Strip whitespace and potential accidental quotes added in dashboards
+        v = v.strip().strip("'").strip('"')
+        
+        if v.startswith("postgres://"):
+            return v.replace("postgres://", "postgresql+asyncpg://", 1)
+        if v.startswith("postgresql://"):
+            return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
 
     # ------------------------------------------------------------------ #
     # PseudoGram
