@@ -147,6 +147,22 @@ never exceeds the limit.
 
 ---
 
+## Failure 7 — PseudoGram Official 500-Event Simulator Generates Invalid HMAC Signatures
+
+**Exact condition:**
+The official PseudoGram 500-event simulator sends webhook requests, but the `X-Pseudogram-Signature` it provides does not match the true `HMAC-SHA256` of the raw HTTP request body (using the API key supplied to the simulator). This was independently verified by capturing the simulator's raw request and mathematically recomputing the HMAC.
+
+**What happens:**
+Our application correctly rejects those requests with HTTP 401 `Invalid webhook signature`, because it strictly enforces security via cryptographic verification.
+
+**Why it happens:**
+The mock simulator itself (or its test-harness) has a bug in its serialization or signing logic, resulting in forged/invalid signatures.
+
+**How to improve:**
+Because this is an external bug in the official test harness, our application mitigates it perfectly by rejecting the invalid traffic at the edge. We intentionally do not bypass or weaken `verify_signature()` to accommodate the simulator's bug. Therefore, the official 500-event stress test cannot currently exercise the background worker using this simulator.
+
+---
+
 ## What Was Intentionally Not Built
 
 - Frontend (per requirements)

@@ -312,39 +312,24 @@ When a `comment.deleted` event arrives:
 
 ---
 
-## Load Testing (500 Events / 10 Seconds)
+## Current Status (Completed Parts: A + B)
 
-To trigger PseudoGram's simulation:
+This project successfully implements all requirements for Part A (Keyword Automation) and Part B (Webhook Signature Verification & Live Stats).
 
-```bash
-curl -X POST https://pseudogram-api.onrender.com/v1/simulate/start \
-  -H "X-Api-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "webhook_url": "https://YOUR-APP.onrender.com/webhook",
-    "count": 500,
-    "duration_seconds": 10
-  }'
-```
+The application architecture includes:
+- **Webhook Security:** Strict `HMAC-SHA256` verification (raw request bytes compared securely against the API key).
+- **Background Processing:** An asynchronous background worker decouples immediate webhook receipt (HTTP 200 response) from rate-limited API calls.
+- **Duplicate Protection:** Two-layer duplicate prevention via database constraints on `event_id` and `UNIQUE(rule_id, user_id)`.
+- **Rate Limiting:** A sliding window `RateLimiter` ensures ≤10 DM requests per 60 seconds.
+- **Delivery Reconciliation:** Asynchronous polling loop checks final DM status without blocking the sender worker.
 
-Expected behavior:
-- 500 webhook requests arrive in 10 seconds → all accepted and persisted quickly.
-- DMs are sent at ≤10 per 60 seconds → takes ~50 minutes to process all 500.
-- `/stats` reflects real-time progress.
+## Load Testing (Simulator Signature Bug)
 
-Compare simulation truth vs `/stats`:
-```bash
-# Immediately after simulation:
-curl https://YOUR-APP.onrender.com/stats
-# Expected: queued ≈ 500, sent = 0
+Part C (500-Event Stress Test) is currently blocked by an upstream bug in the official PseudoGram simulator (`/v1/simulate/start`).
 
-# After 60 seconds:
-curl https://YOUR-APP.onrender.com/stats
-# Expected: queued ≈ 490, sent ≈ 10
+**The Issue:** The simulator generates an `X-Pseudogram-Signature` that does not mathematically match the true `HMAC-SHA256` of its own raw HTTP request body (using the provided API key).
 
-# After full processing:
-# sent + failed + duplicates_blocked ≈ 500
-```
+Because our application strictly enforces security requirements, it correctly rejects these invalid/forged webhook requests with `HTTP 401 Unauthorized`. This prevents the 500-event simulation from exercising the background worker. This issue has been forensically verified (by capturing raw simulator traffic) and documented as a known external limitation in [FAILURES.md](FAILURES.md). We intentionally do not bypass HMAC verification to accommodate the simulator's bug.
 
 ---
 
