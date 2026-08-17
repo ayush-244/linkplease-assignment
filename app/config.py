@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     # How many seconds between each reconciliation poll of GET /v1/dm/{dm_id}.
     DM_RECONCILE_INTERVAL: float = 2.0
 
+    # Maximum send attempts before permanently marking a delivery as failed.
+    MAX_RETRIES: int = 5
+
     # ------------------------------------------------------------------ #
     # Pydantic settings configuration
     # ------------------------------------------------------------------ #

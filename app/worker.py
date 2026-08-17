@@ -161,6 +161,10 @@ async def _handle_comment_created(session, event: Event, rules: list[Rule]) -> N
     if not event.text:
         return
 
+    if event.deleted:
+        logger.info("Comment %s is marked as deleted; skipping delivery creation.", event.comment_id)
+        return
+
     comment_text_lower = event.text.lower()
 
     for rule in rules:
@@ -288,10 +292,10 @@ async def _send_pending_deliveries(session) -> None:
     deliveries = result.scalars().all()
 
     for delivery in deliveries:
-        await _send_one_delivery(session, delivery)
+        await _send_one_delivery(session, delivery.id)
 
 
-async def _send_one_delivery(session, delivery: Delivery) -> None:
+async def _send_one_delivery(session, delivery_id: str) -> None:
     """
     Attempt to send one DM.
 
@@ -299,6 +303,27 @@ async def _send_one_delivery(session, delivery: Delivery) -> None:
     After a successful 202, we set next_reconcile_at and return immediately.
     Phase 4 will check the status in the next iteration.
     """
+    # 1. Attempt to claim this delivery securely using an atomic UPDATE.
+    # This works flawlessly in both SQLite and PostgreSQL without needing SKIP LOCKED.
+    from sqlalchemy import update
+    stmt = (
+        update(Delivery)
+        .where(Delivery.id == delivery_id, Delivery.status == "queued")
+        .values(
+            status="sending",
+            attempts=Delivery.attempts + 1,
+            updated_at=datetime.now(timezone.utc)
+        )
+        .returning(Delivery)
+    )
+    result = await session.execute(stmt)
+    delivery = result.scalar_one_or_none()
+
+    if not delivery:
+        # Already claimed by another worker or status changed
+        await session.commit()
+        return
+
     # Load the rule to get the message content.
     rule_result = await session.execute(
         select(Rule).where(Rule.id == delivery.rule_id)
@@ -311,15 +336,17 @@ async def _send_one_delivery(session, delivery: Delivery) -> None:
         await session.commit()
         return
 
-    # Increment attempt count and mark as "sending" before the HTTP call.
-    # This prevents another worker from picking up the same delivery.
-    delivery.attempts += 1
-    delivery.status = "sending"
-    delivery.updated_at = datetime.now(timezone.utc)
-    await session.commit()
-
-    # Acquire a rate-limiter slot.  Sleeps if we are at the 10 req/60s limit.
-    await rate_limiter.acquire()
+    # We must acquire a rate limit token before proceeding.
+    acquired, wait_seconds = await rate_limiter.try_acquire(session)
+    if not acquired:
+        # Rate limit reached. Put the delivery back in the queue and schedule it.
+        delivery.attempts = max(0, delivery.attempts - 1)  # Don't penalize attempt count
+        delivery.status = "queued"
+        delivery.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=wait_seconds)
+        delivery.updated_at = datetime.now(timezone.utc)
+        await session.commit()
+        logger.info("Rate limit reached. Delivery %s will wait %.2fs.", delivery.id, wait_seconds)
+        return
 
     try:
         dm_id = await send_dm(
@@ -418,11 +445,8 @@ async def _check_one_delivery_status(session, delivery: Delivery) -> None:
         logger.info("Delivery %s confirmed delivered.", delivery.id)
 
     elif status == "failed":
-        delivery.status = "failed"
-        delivery.next_reconcile_at = None
-        delivery.updated_at = datetime.now(timezone.utc)
-        await session.commit()
-        logger.warning("Delivery %s reported failed by PseudoGram.", delivery.id)
+        logger.warning("Delivery %s reported failed by PseudoGram, scheduling retry.", delivery.id)
+        await _schedule_retry(session, delivery)
 
     else:
         # Still "queued" on PseudoGram's side.  Check again later.

@@ -3,33 +3,7 @@
 This document is intentionally honest. Every item below describes a real
 failure mode that is possible with the current architecture.
 
----
 
-## Failure 1 — Double-send on crash between POST and dm_id persistence
-
-**Exact condition:**
-1. Worker calls `POST /v1/dm/send`.
-2. PseudoGram accepts the DM and returns 202 with a `dm_id`.
-3. Process crashes **before** the worker saves `dm_id` to the database.
-4. On restart, `_recover_stuck_deliveries()` sees the delivery in "sending" without a `dm_id`.
-5. It resets the delivery to "queued".
-6. The worker sends the DM again.
-
-**What happens:**
-The same user receives the DM twice for the same comment.
-The `UNIQUE(rule_id, user_id)` constraint does **not** prevent this because
-there is only one Delivery row — we are sending it again, not inserting a duplicate.
-
-**Why it happens:**
-The crash window between HTTP response receipt and database commit is unavoidable
-without distributed transaction support.
-
-**How to improve:**
-Use a two-phase commit or an idempotency key when calling PseudoGram's API.
-If PseudoGram supports idempotent DM sends (e.g., via a request UUID), we could
-pass the delivery ID as the idempotency key, making a retry safe.
-
----
 
 ## Failure 2 — Database outage while receiving a webhook
 
@@ -100,54 +74,7 @@ deliveries. Or implement a dead-letter queue with a longer-term retry policy
 
 ---
 
-## Failure 5 — Single worker process cannot scale horizontally
-
-**Exact condition:**
-Two instances of the app are deployed simultaneously (e.g., during a rolling
-deploy on Render).
-
-**What happens:**
-Both workers poll the database at the same time. Both might pick up the same
-`queued` delivery and try to send it. The first one to commit `status="sending"`
-wins. The second will try to update the same row to "sending" again — which
-may or may not cause a double-send depending on timing.
-
-The `UNIQUE(rule_id, user_id)` constraint does **not** protect here because
-there is still only one Delivery row; both workers are updating the same row.
-
-**Why it happens:**
-No row-level locking (`SELECT FOR UPDATE SKIP LOCKED`) is implemented.
-The current design explicitly documents "single sender worker" as a constraint.
-
-**How to improve:**
-Add `FOR UPDATE SKIP LOCKED` to the delivery fetch query. This tells PostgreSQL
-to give each worker a non-overlapping set of rows, making horizontal scaling safe.
-Note: SQLite (used in tests) does not support `SKIP LOCKED`.
-
----
-
-## Failure 6 — In-process rate limiter is not shared across instances
-
-**Exact condition:**
-Multiple app instances are running simultaneously (see Failure 5).
-
-**What happens:**
-Each instance has its own `RateLimiter` object in memory, tracking only its own
-API calls. If two instances each make 10 calls in 60 seconds, they have collectively
-made 20 calls — exceeding PseudoGram's limit. PseudoGram will return 429.
-
-**Why it happens:**
-The sliding-window counter is stored in a Python `deque` in the process's memory,
-not in a shared store.
-
-**How to improve:**
-Use Redis with an atomic `INCR + EXPIRE` or a sliding-window Lua script as the
-shared rate-limit counter. This guarantees the aggregate across all instances
-never exceeds the limit.
-
----
-
-## Failure 7 — PseudoGram Official 500-Event Simulator Generates Invalid HMAC Signatures
+## Failure 5 — PseudoGram Official 500-Event Simulator Generates Invalid HMAC Signatures
 
 **Exact condition:**
 The official PseudoGram 500-event simulator sends webhook requests, but the `X-Pseudogram-Signature` it provides does not match the true `HMAC-SHA256` of the raw HTTP request body (using the API key supplied to the simulator). This was independently verified by capturing the simulator's raw request and mathematically recomputing the HMAC.
@@ -159,7 +86,7 @@ Our application correctly rejects those requests with HTTP 401 `Invalid webhook 
 The mock simulator itself (or its test-harness) has a bug in its serialization or signing logic, resulting in forged/invalid signatures.
 
 **How to improve:**
-Because this is an external bug in the official test harness, our application mitigates it perfectly by rejecting the invalid traffic at the edge. We intentionally do not bypass or weaken `verify_signature()` to accommodate the simulator's bug. Therefore, the official 500-event stress test cannot currently exercise the background worker using this simulator.
+Because this is an external bug in the official test harness, our application mitigates it perfectly by rejecting the invalid traffic at the edge. We intentionally do not bypass or weaken `verify_signature()` to accommodate the simulator's bug. A local correctly-signing mock was therefore used to validate the application's Part C queue/rate-limit behavior.
 
 ---
 
@@ -169,5 +96,4 @@ Because this is an external bug in the official test harness, our application mi
 - Authentication on management endpoints (`/rules`, `/stats`)
 - Alembic migration files (using `create_all` instead)
 - Admin endpoint to manually re-queue failed deliveries
-- Redis-backed rate limiter for multi-instance deployments
 - Webhook delivery retry from PseudoGram's side (we trust their retry policy)

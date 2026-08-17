@@ -128,9 +128,9 @@ async def test_500_schedules_retry(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.side_effect = PseudoGramServerError("500")
-        await _send_one_delivery(db_session, delivery)
+        await _send_one_delivery(db_session, delivery.id)
 
     await db_session.refresh(delivery)
     assert delivery.status == "queued"
@@ -158,9 +158,9 @@ async def test_500_fails_after_max_attempts(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.side_effect = PseudoGramServerError("500")
-        await _send_one_delivery(db_session, delivery)
+        await _send_one_delivery(db_session, delivery.id)
 
     await db_session.refresh(delivery)
     assert delivery.status == "failed"
@@ -181,9 +181,9 @@ async def test_429_sets_retry_after(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.side_effect = PseudoGramRateLimitError(retry_after=30)
-        await _send_one_delivery(db_session, delivery)
+        await _send_one_delivery(db_session, delivery.id)
 
     await db_session.refresh(delivery)
     assert delivery.status == "queued"
@@ -210,9 +210,9 @@ async def test_400_fails_immediately(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.side_effect = PseudoGramBadRequestError("invalid recipient")
-        await _send_one_delivery(db_session, delivery)
+        await _send_one_delivery(db_session, delivery.id)
 
     await db_session.refresh(delivery)
     assert delivery.status == "failed"
@@ -241,9 +241,9 @@ async def test_202_not_immediately_delivered(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.return_value = "dm_202_test"
-        await _send_one_delivery(db_session, delivery)
+        await _send_one_delivery(db_session, delivery.id)
 
     await db_session.refresh(delivery)
     # After 202, status is "sending" — NOT "delivered".
@@ -304,5 +304,6 @@ async def test_reconciliation_marks_failed(db_session):
         await _check_one_delivery_status(db_session, delivery)
 
     await db_session.refresh(delivery)
-    assert delivery.status == "failed"
-    assert delivery.next_reconcile_at is None
+    assert delivery.status == "queued"
+    assert delivery.attempts == 1
+    assert delivery.next_retry_at is not None

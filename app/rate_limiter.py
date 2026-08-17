@@ -1,37 +1,40 @@
 """
-rate_limiter.py — Sliding-window rate limiter.
+rate_limiter.py — Database-backed sliding-window rate limiter.
 
 PseudoGram allows 10 requests per rolling 60-second window.
 
 How the sliding window works:
-  We keep a list (deque) of timestamps of recent API calls.
-  Before each call we:
-    1. Remove timestamps older than 60 seconds from the front.
-    2. If 10 timestamps remain, we must wait before making the next call.
-       We sleep until the oldest timestamp is more than 60 seconds ago.
-    3. Add the current timestamp and allow the call to proceed.
+  We maintain exactly 10 token rows in the DB.
+  When we want to send a DM, we try to acquire the oldest token that was
+  last used more than 60 seconds ago.
 
-Why a deque?
-  A deque (double-ended queue) lets us remove from the left and append to
-  the right in O(1) time, which is more efficient than a plain list.
+  If we get it, we update `used_at` to now() and proceed.
+  If we don't, it means all 10 tokens were used within the last 60 seconds,
+  so we hit the limit. We find the oldest token's `used_at` and calculate
+  how long until it expires, so we can schedule a retry.
 
-Why is this safe with a single worker?
-  Because there is only ONE sender coroutine running at a time, we never
-  have two calls trying to acquire a slot simultaneously.  If we had
-  multiple senders we would need a lock.
+Why DB-backed?
+  An in-memory deque only works for a single worker process. If deployed
+  with multiple workers (horizontal scaling), they must coordinate via the DB.
+  We use `FOR UPDATE SKIP LOCKED` (where supported, e.g. PostgreSQL) or a
+  simple `FOR UPDATE` (SQLite test DB fallback) to ensure safe concurrent access.
 """
 
-import asyncio
 import logging
-from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError
+
+from app.models import RateLimitToken
 
 logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
     """
-    Async sliding-window rate limiter.
+    Database-backed sliding-window rate limiter.
 
     Args:
         max_calls: Maximum number of calls allowed in the window.
@@ -41,41 +44,69 @@ class RateLimiter:
     def __init__(self, max_calls: int = 10, period: float = 60.0):
         self.max_calls = max_calls
         self.period = period
-        # Store the timestamp (as float) of each recent call.
-        self._calls: deque[float] = deque()
 
-    async def acquire(self) -> None:
+    async def try_acquire(self, session: AsyncSession) -> tuple[bool, float]:
         """
-        Wait until we are allowed to make one more API call, then return.
+        Attempt to acquire a rate limit token.
 
-        Call this immediately before every outgoing PseudoGram request.
+        Returns:
+            (acquired, wait_seconds)
+            If acquired == True, you can proceed immediately (wait_seconds=0.0).
+            If acquired == False, the limit is reached. wait_seconds tells you
+            how long until the next token becomes available.
         """
-        while True:
-            now = datetime.now(timezone.utc).timestamp()
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(seconds=self.period)
 
-            # Remove timestamps that have fallen outside the 60-second window.
-            while self._calls and now - self._calls[0] >= self.period:
-                self._calls.popleft()
+        # Try to find one token older than window_start and lock it.
+        # SQLite doesn't fully support SKIP LOCKED in all versions used by SQLAlchemy,
+        # but for production PostgreSQL, SKIP LOCKED is highly recommended for concurrency.
+        # We will use with_for_update() and handle the token.
 
-            if len(self._calls) < self.max_calls:
-                # We have capacity — record this call and continue.
-                self._calls.append(now)
-                return
+        # 1. First, check if there is an available token.
+        stmt = select(RateLimitToken).where(RateLimitToken.used_at <= window_start).order_by(RateLimitToken.used_at.asc()).limit(1).with_for_update(skip_locked=True)
 
-            # We are at the limit.  Calculate how long until the oldest
-            # call rolls out of the window.
-            oldest = self._calls[0]
-            wait_seconds = self.period - (now - oldest)
-            logger.info(
-                "Rate limit reached (%d/%d calls). Waiting %.2fs.",
-                len(self._calls),
-                self.max_calls,
-                wait_seconds,
-            )
-            # Sleep without blocking the event loop.
-            await asyncio.sleep(max(0.0, wait_seconds))
+        try:
+            result = await session.execute(stmt)
+            token = result.scalar_one_or_none()
+        except DBAPIError as e:
+            # Fallback for SQLite which may throw syntax error on SKIP LOCKED depending on driver version.
+            # In our tests, SQLite might fail here. We fallback to simple FOR UPDATE.
+            logger.debug(f"SKIP LOCKED failed (likely SQLite), falling back to normal FOR UPDATE: {e}")
+            await session.rollback()
+            stmt = select(RateLimitToken).where(RateLimitToken.used_at <= window_start).order_by(RateLimitToken.used_at.asc()).limit(1).with_for_update()
+            result = await session.execute(stmt)
+            token = result.scalar_one_or_none()
+
+        if token:
+            # Acquired! Update used_at to now.
+            token.used_at = now
+            await session.commit()
+            return True, 0.0
+
+        # 2. Limit reached (all 10 tokens used in last 60s).
+        # We must NOT wait inside this transaction. Find the oldest token to calculate wait time.
+        # No lock needed just to read the oldest token.
+        oldest_stmt = select(RateLimitToken).order_by(RateLimitToken.used_at.asc()).limit(1)
+        oldest_res = await session.execute(oldest_stmt)
+        oldest_token = oldest_res.scalar_one_or_none()
+
+        if not oldest_token:
+            # Defensive fallback if the table wasn't initialized.
+            return False, self.period
+
+        # Calculate how long until the oldest token falls outside the window.
+        used_at = oldest_token.used_at
+        if used_at.tzinfo is None:
+            used_at = used_at.replace(tzinfo=timezone.utc)
+
+        wait_seconds = self.period - (now - used_at).total_seconds()
+
+        # Ensure we return at least a small positive wait time if there are clock skew issues.
+        wait_seconds = max(0.1, wait_seconds)
+
+        return False, wait_seconds
 
 
-# Single global instance shared by the worker.
-# max_calls=10, period=60 matches PseudoGram's documented limit.
+# Single global instance
 rate_limiter = RateLimiter(max_calls=10, period=60.0)

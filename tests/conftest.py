@@ -17,7 +17,7 @@ import hashlib
 import hmac
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
 # Inject test environment variables BEFORE importing the app.
@@ -57,6 +57,19 @@ async def db_engine():
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Initialize rate limit tokens for the test DB
+    from app.models import RateLimitToken
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy import select
+    async with AsyncSession(engine, expire_on_commit=False) as init_session:
+        # Check if tokens exist
+        res = await init_session.execute(select(RateLimitToken))
+        if not res.scalars().first():
+            # Create 10 tokens with a really old timestamp so they are immediately available
+            epoch = datetime.now(timezone.utc) - timedelta(days=1)
+            init_session.add_all([RateLimitToken(used_at=epoch) for _ in range(10)])
+            await init_session.commit()
 
     yield engine
 

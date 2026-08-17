@@ -64,6 +64,7 @@ async def send_dm(
     recipient_user_id: str,
     message: str,
     comment_id: str,
+    rule_id: str,
 ) -> str:
     """
     POST /v1/dm/send — Ask PseudoGram to queue a DM.
@@ -91,6 +92,8 @@ async def send_dm(
         # NOTE: The key value is intentionally NOT logged anywhere.
         "X-Api-Key": settings.PSEUDOGRAM_API_KEY,
         "Content-Type": "application/json",
+        # Idempotency key based on deterministic delivery identity.
+        "Idempotency-Key": f"{rule_id}-{recipient_user_id}",
     }
 
     logger.info("Sending DM to user_id=%s for comment_id=%s", recipient_user_id, comment_id)

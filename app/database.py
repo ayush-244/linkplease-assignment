@@ -87,6 +87,17 @@ async def init_db() -> None:
     """
     # Import models so SQLAlchemy knows about them before we call create_all.
     import app.models  # noqa: F401
+    from sqlalchemy import select
+    from datetime import datetime, timezone
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # Initialize exactly 10 rate limit tokens for the distributed rate limiter.
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(app.models.RateLimitToken).limit(1))
+        if not result.scalars().first():
+            past = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            for i in range(1, 11):
+                session.add(app.models.RateLimitToken(id=i, used_at=past))
+            await session.commit()

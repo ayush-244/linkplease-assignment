@@ -237,3 +237,28 @@ class DuplicateBlock(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now
     )
+
+
+# ---------------------------------------------------------------------------
+# RateLimitToken
+# ---------------------------------------------------------------------------
+
+class RateLimitToken(Base):
+    """
+    Database-backed tokens for distributed rate limiting.
+
+    We enforce 10 requests per 60 seconds.
+    On app startup, exactly 10 rows (id=1..10) are created.
+    When a worker needs to send a DM, it looks for the oldest token where
+    used_at < now - 60s, locks it (FOR UPDATE SKIP LOCKED), and updates used_at.
+
+    This ensures multiple workers running simultaneously cannot exceed the
+    10 req/60s limit globally.
+    """
+
+    __tablename__ = "rate_limit_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # The exact UTC time this token was last used.
+    # We initialize it to the distant past (e.g., 2000-01-01) so they are immediately available.
+    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

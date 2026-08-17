@@ -48,7 +48,7 @@ async def test_queued_job_survives_restart(db_session):
 
     # Run the send phase — it should pick up this delivery.
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.return_value = "dm_persist_001"
         await _send_pending_deliveries(db_session)
 
@@ -81,7 +81,7 @@ async def test_retry_survives_restart(db_session):
     await db_session.commit()
 
     with patch("app.worker.send_dm", new_callable=AsyncMock) as mock_send, \
-         patch("app.worker.rate_limiter.acquire", new_callable=AsyncMock):
+         patch("app.worker.rate_limiter.try_acquire", return_value=(True, 0.0)):
         mock_send.return_value = "dm_retry_restart_001"
         await _send_pending_deliveries(db_session)
 
